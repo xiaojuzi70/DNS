@@ -11,52 +11,6 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 菜单显示
-echo -e "${green}==== 综合服务器配置工具 ====${plain}"
-echo "本脚本支持以下功能："
-echo "1) 修改 SSH 配置（包括端口和密钥登录）"
-echo "2) 配置 Fail2Ban 防护规则"
-echo "3) 解封指定 IP"
-echo "4) 更新系统源"
-echo "5) 配置 DNS"
-echo "6) 启用时间同步服务"
-echo "7) 退出"
-echo
-
-# 用户选择菜单
-while true; do
-  echo -n "请输入你的选择 [1-7]: "
-  read -r choice
-
-  case $choice in
-    1)
-      modify_ssh_config
-      ;;
-    2)
-      configure_fail2ban
-      ;;
-    3)
-      unban_ip
-      ;;
-    4)
-      update_sources
-      ;;
-    5)
-      configure_dns
-      ;;
-    6)
-      enable_ntp_service
-      ;;
-    7)
-      echo "退出脚本"
-      break
-      ;;
-    *)
-      echo "无效选项，请重新输入 [1-7]。"
-      ;;
-  esac
-done
-
 # 功能 1: 修改 SSH 配置
 function modify_ssh_config() {
   echo -e "${yellow}1. 修改 SSH 配置...${plain}"
@@ -227,3 +181,35 @@ EOF
     *)
       echo "无效选择，跳过 DNS 配置。"
       ;;
+  esac
+}
+
+# 功能 6: 启用时间同步服务
+function enable_ntp_service() {
+  echo -e "${yellow}6. 启用时间同步服务...${plain}"
+  if ! command -v timedatectl &>/dev/null; then
+    echo "正在安装时间同步服务..."
+    apt install -y ntp
+  fi
+  timedatectl set-ntp true
+  echo "时间同步服务已启用。"
+}
+
+# 菜单显示
+echo -e "${green}==== 综合服务器配置工具 ====${plain}"
+echo "本脚本支持以下功能："
+echo "1) 修改 SSH 配置（包括端口和密钥登录）"
+echo "2) 配置 Fail2Ban 防护规则"
+echo "3) 解封指定 IP"
+echo "4) 更新系统源"
+echo "5) 配置 DNS"
+echo "6) 启用时间同步服务"
+echo "7) 退出"
+echo
+
+# 用户选择菜单
+while true; do
+  echo -n "请输入你的选择 [1-7]: "
+  read -r choice
+
+  case $choice
