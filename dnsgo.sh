@@ -22,6 +22,14 @@ echo "6) 启用时间同步服务"
 echo "7) 退出"
 echo
 
+# 让我们为每个选项提供默认选择，以防万一输入问题
+DEFAULT_SSH_PORT=2222
+DEFAULT_PASSWORD_AUTH="n"
+DEFAULT_FAIL2BAN_MAXRETRY=3
+DEFAULT_FAIL2BAN_BANTIME=86400
+DEFAULT_FAIL2BAN_FINDTIME=600
+DEFAULT_DNS_CHOICE=1
+
 # 功能 1: 修改 SSH 配置
 function modify_ssh_config() {
   echo -e "${yellow}1. 修改 SSH 配置...${plain}"
@@ -33,18 +41,16 @@ function modify_ssh_config() {
     cp $SSH_CONFIG $BACKUP_CONFIG
   fi
 
-  echo -n "请输入新的 SSH 端口（默认 2222，留空跳过）："
+  echo -n "请输入新的 SSH 端口（默认 $DEFAULT_SSH_PORT，留空跳过）："
   read -r new_port
+  new_port=${new_port:-$DEFAULT_SSH_PORT}
 
-  if [[ -n $new_port ]]; then
-    sed -i "s/^#\?Port.*/Port $new_port/" $SSH_CONFIG
-    echo "SSH 端口已修改为 $new_port。"
-  else
-    echo "跳过 SSH 端口修改。"
-  fi
+  sed -i "s/^#\?Port.*/Port $new_port/" $SSH_CONFIG
+  echo "SSH 端口已修改为 $new_port。"
 
-  echo -n "是否禁用密码登录？(y/n，默认 n)："
+  echo -n "是否禁用密码登录？(y/n，默认 $DEFAULT_PASSWORD_AUTH)："
   read -r disable_password
+  disable_password=${disable_password:-$DEFAULT_PASSWORD_AUTH}
 
   if [[ $disable_password == "y" ]]; then
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' $SSH_CONFIG
@@ -71,17 +77,17 @@ function configure_fail2ban() {
     apt install -y fail2ban || { echo "安装 Fail2Ban 失败"; exit 1; }
   fi
 
-  echo -n "请输入最大尝试次数（默认 3，留空跳过）："
+  echo -n "请输入最大尝试次数（默认 $DEFAULT_FAIL2BAN_MAXRETRY，留空跳过）："
   read -r maxretry
-  maxretry=${maxretry:-3}
+  maxretry=${maxretry:-$DEFAULT_FAIL2BAN_MAXRETRY}
 
-  echo -n "请输入封禁时间（秒，默认 86400，留空跳过）："
+  echo -n "请输入封禁时间（秒，默认 $DEFAULT_FAIL2BAN_BANTIME，留空跳过）："
   read -r bantime
-  bantime=${bantime:-86400}
+  bantime=${bantime:-$DEFAULT_FAIL2BAN_BANTIME}
 
-  echo -n "请输入检测时间窗口（秒，默认 600，留空跳过）："
+  echo -n "请输入检测时间窗口（秒，默认 $DEFAULT_FAIL2BAN_FINDTIME，留空跳过）："
   read -r findtime
-  findtime=${findtime:-600}
+  findtime=${findtime:-$DEFAULT_FAIL2BAN_FINDTIME}
 
   cat > $FAIL2BAN_CONFIG <<EOL
 [sshd]
@@ -126,7 +132,8 @@ function update_sources() {
   echo "2) 阿里云源"
   echo "3) 清华大学源"
   echo "4) 火山引擎源"
-  read -p "请输入你的选择 (1-4): " SOURCE_CHOICE
+  read -p "请输入你的选择 (1-4，默认 $DEFAULT_SSH_PORT): " SOURCE_CHOICE
+  SOURCE_CHOICE=${SOURCE_CHOICE:-1}
 
   case $SOURCE_CHOICE in
     1)
@@ -174,7 +181,8 @@ function configure_dns() {
   echo "1) Google DNS (8.8.8.8, 8.8.4.4)"
   echo "2) Cloudflare DNS (1.1.1.1, 1.0.0.1)"
   echo "3) 阿里云 DNS (223.5.5.5, 223.6.6.6)"
-  read -p "请输入你的选择 (1-3): " DNS_CHOICE
+  read -p "请输入你的选择 (1-3，默认 $DEFAULT_DNS_CHOICE): " DNS_CHOICE
+  DNS_CHOICE=${DNS_CHOICE:-$DEFAULT_DNS_CHOICE}
 
   case $DNS_CHOICE in
     1)
@@ -196,25 +204,4 @@ nameserver 223.6.6.6
 EOF
       ;;
     *)
-      echo "跳过配置 DNS。"
-      return
-      ;;
-  esac
-
-  chattr +i /etc/resolv.conf || { echo "设置不可修改标志失败"; exit 1; }
-  echo "DNS 配置完成！"
-}
-
-# 功能 6: 启用时间同步
-function enable_time_sync() {
-  echo -e "${yellow}6. 启用时间同步服务...${plain}"
-  apt install -y systemd-timesyncd || { echo "安装时间同步服务失败"; exit 1; }
-  systemctl enable systemd-timesyncd
-  systemctl start systemd-timesyncd
-
-  if timedatectl status | grep "NTP synchronized: yes" > /dev/null; then
-    echo "时间同步成功！"
-  else
-    echo "时间同步失败！"
-  fi
-}
+      echo
