@@ -1,222 +1,238 @@
 #!/bin/bash
 
+# 颜色定义
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
+blue='\033[0;34m'
 plain='\033[0m'
 
-# 确保以 root 用户运行
-[[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 请以 root 用户运行此脚本。" && exit 1
+# 日志文件
+LOG_FILE="/var/log/server_config.log"
 
-# 检查必要的命令是否存在
-check_dependencies() {
-    if ! command -v lsb_release &> /dev/null; then
-        echo "正在安装 lsb-release..."
-        apt update && apt install -y lsb-release || exit 1
+# 写入日志函数
+log() {
+    echo "$(date "+%Y-%m-%d %H:%M:%S") $1" >> "$LOG_FILE"
+    echo -e "$1"
+}
+
+# 错误处理函数
+error() {
+    log "${red}错误：$1${plain}"
+    exit 1
+}
+
+# 检查系统函数
+check_system() {
+    if [[ -f /etc/redhat-release ]]; then
+        error "当前脚本仅支持 Debian/Ubuntu 系统"
+    fi
+    
+    if ! command -v apt &> /dev/null; then
+        error "未找到 apt 包管理器，请确认系统类型"
     fi
 }
 
-# 功能 1: 修改 SSH 配置
+# 初始化函数
+init_system() {
+    [[ $EUID -ne 0 ]] && error "请以 root 用户运行此脚本"
+    
+    # 创建日志目录
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE"
+    
+    # 检查并安装基础工具
+    local tools=(curl wget ufw net-tools)
+    for tool in "${tools[@]}"; do
+        if ! command -v "$tool" &> /dev/null; then
+            log "正在安装 $tool..."
+            apt update && apt install -y "$tool" || error "安装 $tool 失败"
+        fi
+    done
+}
+
+# 备份函数
+backup_config() {
+    local file=$1
+    local backup_dir="/root/server_config_backup/$(date +%Y%m%d)"
+    mkdir -p "$backup_dir"
+    cp "$file" "$backup_dir/" || error "备份 $file 失败"
+    log "已备份 $file 到 $backup_dir"
+}
+
+# 修改 SSH 配置
 modify_ssh_config() {
-    echo -e "${yellow}1. 修改 SSH 配置...${plain}"
-    SSH_CONFIG="/etc/ssh/sshd_config"
-    BACKUP_CONFIG="/etc/ssh/sshd_config.bak"
-
-    [[ ! -f $BACKUP_CONFIG ]] && cp $SSH_CONFIG $BACKUP_CONFIG
-
-    read -p "请输入新的 SSH 端口（默认 2222，留空跳过）：" new_port
+    log "${yellow}正在配置 SSH...${plain}"
+    local ssh_config="/etc/ssh/sshd_config"
+    
+    # 备份配置
+    backup_config "$ssh_config"
+    
+    # 配置 SSH 端口
+    read -p "请输入新的 SSH 端口（留空使用 2222）: " new_port
     new_port=${new_port:-2222}
-
-    sed -i "s/^#\?Port.*/Port $new_port/" $SSH_CONFIG
-    echo "SSH 端口已修改为 $new_port"
-
-    read -p "是否禁用密码登录？(y/n，默认 n)：" disable_password
-    disable_password=${disable_password:-n}
-
-    if [[ $disable_password == "y" ]]; then
-        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' $SSH_CONFIG
-        echo "已禁用密码登录"
-    else
-        echo "保持密码登录启用"
+    if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
+        error "无效的端口号"
     fi
-
-    systemctl restart sshd && echo "SSH 服务重启成功！" || echo "SSH 服务重启失败！"
+    
+    # 配置密钥登录
+    read -p "是否禁用密码登录？(y/n): " disable_passwd
+    case "$disable_passwd" in
+        [yY])
+            sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$ssh_config"
+            log "已禁用密码登录"
+            ;;
+        [nN])
+            sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$ssh_config"
+            log "已启用密码登录"
+            ;;
+        *)
+            log "保持原有密码登录设置"
+            ;;
+    esac
+    
+    # 更新 SSH 端口
+    sed -i "s/^#\?Port.*/Port $new_port/" "$ssh_config"
+    
+    # 配置防火墙
+    if command -v ufw &> /dev/null; then
+        ufw allow "$new_port"/tcp
+        ufw reload
+    fi
+    
+    # 重启 SSH 服务
+    systemctl restart sshd || error "重启 SSH 服务失败"
+    log "${green}SSH 配置完成，新端口: $new_port${plain}"
 }
 
-# 功能 2: 配置 Fail2Ban
+# 增强版 Fail2Ban 配置
 configure_fail2ban() {
-    echo -e "${yellow}2. 配置 Fail2Ban...${plain}"
-    FAIL2BAN_CONFIG="/etc/fail2ban/jail.local"
-
-    if ! command -v fail2ban-server &>/dev/null; then
-        echo "Fail2Ban 未安装，正在安装..."
-        apt update && apt install -y fail2ban || { echo "安装 Fail2Ban 失败"; return 1; }
+    log "${yellow}正在配置 Fail2Ban...${plain}"
+    
+    # 安装 Fail2Ban
+    if ! command -v fail2ban-server &> /dev/null; then
+        apt update && apt install -y fail2ban || error "安装 Fail2Ban 失败"
     fi
-
-    read -p "请输入最大尝试次数（默认 3，留空跳过）：" maxretry
+    
+    local config_file="/etc/fail2ban/jail.local"
+    backup_config "$config_file"
+    
+    # 获取配置参数
+    read -p "请输入最大尝试次数 [3]: " maxretry
+    read -p "请输入封禁时间(秒) [86400]: " bantime
+    read -p "请输入检测时间窗口(秒) [600]: " findtime
+    
     maxretry=${maxretry:-3}
-
-    read -p "请输入封禁时间（秒，默认 86400，留空跳过）：" bantime
     bantime=${bantime:-86400}
-
-    read -p "请输入检测时间窗口（秒，默认 600，留空跳过）：" findtime
     findtime=${findtime:-600}
+    
+    # 创建配置
+    cat > "$config_file" <<EOF
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1
+bantime = $bantime
+findtime = $findtime
+maxretry = $maxretry
+banaction = ufw
 
-    cat > $FAIL2BAN_CONFIG <<EOL
 [sshd]
 enabled = true
 port = $(grep ^Port /etc/ssh/sshd_config | awk '{print $2}')
 logpath = /var/log/auth.log
 maxretry = $maxretry
-bantime = $bantime
-findtime = $findtime
-EOL
-
-    systemctl restart fail2ban && echo "Fail2Ban 配置完成！" || echo "Fail2Ban 服务重启失败！"
-}
-
-# 功能 3: 解封 IP
-unban_ip() {
-    echo -e "${yellow}3. 解封指定 IP...${plain}"
-    read -p "请输入要解封的 IP 地址（留空跳过）：" ip_address
-
-    if [[ -n $ip_address ]]; then
-        if systemctl is-active --quiet fail2ban; then
-            fail2ban-client unban "$ip_address" && echo "IP 地址 $ip_address 已解封！" || echo "解封失败"
-        else
-            echo "Fail2Ban 未启动，无法解封 IP"
-        fi
-    else
-        echo "跳过解封 IP"
-    fi
-}
-
-# 功能 4: 更新系统源
-update_sources() {
-    echo -e "${yellow}4. 更新系统源...${plain}"
-    cp /etc/apt/sources.list /etc/apt/sources.list.bak
-    DEBIAN_VERSION=$(lsb_release -sc)
-
-    echo "请选择你要使用的系统源:"
-    echo "1) 官方系统源"
-    echo "2) 阿里云源"
-    echo "3) 清华大学源"
-    echo "4) 火山引擎源"
-    read -p "请输入选择（1-4，默认 1）: " SOURCE_CHOICE
-    SOURCE_CHOICE=${SOURCE_CHOICE:-1}
-
-    case $SOURCE_CHOICE in
-        1)
-            cat > /etc/apt/sources.list << EOF
-deb http://deb.debian.org/debian/ $DEBIAN_VERSION main contrib non-free
-deb http://deb.debian.org/debian/ $DEBIAN_VERSION-updates main contrib non-free
-deb http://deb.debian.org/debian-security/ $DEBIAN_VERSION-security main contrib non-free
 EOF
+    
+    systemctl restart fail2ban || error "重启 Fail2Ban 失败"
+    log "${green}Fail2Ban 配置完成${plain}"
+}
+
+# 优化版 DNS 配置
+configure_dns() {
+    log "${yellow}正在配置 DNS...${plain}"
+    
+    # 备份当前配置
+    backup_config "/etc/resolv.conf"
+    
+    echo "可用的 DNS 配置:"
+    echo "1) Google DNS (8.8.8.8, 8.8.4.4)"
+    echo "2) Cloudflare DNS (1.1.1.1, 1.0.0.1)"
+    echo "3) 阿里云 DNS (223.5.5.5, 223.6.6.6)"
+    echo "4) 自定义 DNS"
+    
+    read -p "请选择 DNS [1]: " choice
+    choice=${choice:-1}
+    
+    case "$choice" in
+        1)
+            dns1="8.8.8.8"
+            dns2="8.8.4.4"
             ;;
         2)
-            cat > /etc/apt/sources.list << EOF
-deb http://mirrors.aliyun.com/debian/ $DEBIAN_VERSION main contrib non-free
-deb http://mirrors.aliyun.com/debian/ $DEBIAN_VERSION-updates main contrib non-free
-deb http://mirrors.aliyun.com/debian-security $DEBIAN_VERSION-security main contrib non-free
-EOF
+            dns1="1.1.1.1"
+            dns2="1.0.0.1"
             ;;
         3)
-            cat > /etc/apt/sources.list << EOF
-deb https://mirrors.tuna.tsinghua.edu.cn/debian/ $DEBIAN_VERSION main contrib non-free
-deb https://mirrors.tuna.tsinghua.edu.cn/debian/ $DEBIAN_VERSION-updates main contrib non-free
-deb https://mirrors.tuna.tsinghua.edu.cn/debian-security $DEBIAN_VERSION-security main contrib non-free
-EOF
+            dns1="223.5.5.5"
+            dns2="223.6.6.6"
             ;;
         4)
-            cat > /etc/apt/sources.list << EOF
-deb https://mirrors.volces.com/debian/ $DEBIAN_VERSION main contrib non-free
-deb https://mirrors.volces.com/debian/ $DEBIAN_VERSION-updates main contrib non-free
-deb https://mirrors.volces.com/debian-security $DEBIAN_VERSION-security main contrib non-free
-EOF
+            read -p "请输入首选 DNS: " dns1
+            read -p "请输入备用 DNS: " dns2
             ;;
         *)
-            echo "无效的选择，跳过更新系统源"
-            return
+            error "无效选择"
             ;;
     esac
-
-    apt update || { echo "更新源失败"; return 1; }
-    echo "系统源更新完成！"
-}
-
-# 功能 5: 配置 DNS
-configure_dns() {
-    echo -e "${yellow}5. 配置 DNS...${plain}"
-    echo "请选择你要使用的 DNS:"
-    echo "1) Google DNS"
-    echo "2) Cloudflare DNS"
-    echo "3) 阿里云 DNS"
-    read -p "请输入选择（1-3，默认 1）: " DNS_CHOICE
-    DNS_CHOICE=${DNS_CHOICE:-1}
-
-    case $DNS_CHOICE in
-        1)
-            cat > /etc/resolv.conf << EOF
-nameserver 8.8.8.8
-nameserver 8.8.4.4
+    
+    # 配置 DNS
+    cat > "/etc/resolv.conf" <<EOF
+nameserver $dns1
+nameserver $dns2
 EOF
-            ;;
-        2)
-            cat > /etc/resolv.conf << EOF
-nameserver 1.1.1.1
-nameserver 1.0.0.1
-EOF
-            ;;
-        3)
-            cat > /etc/resolv.conf << EOF
-nameserver 223.5.5.5
-nameserver 223.6.6.6
-EOF
-            ;;
-        *)
-            echo "无效选择，跳过 DNS 配置"
-            ;;
-    esac
-}
-
-# 功能 6: 启用时间同步服务
-enable_ntp_service() {
-    echo -e "${yellow}6. 启用时间同步服务...${plain}"
-    if ! command -v timedatectl &>/dev/null; then
-        echo "正在安装时间同步服务..."
-        apt install -y ntp
+    
+    # 测试 DNS
+    if ! ping -c 1 google.com &> /dev/null; then
+        log "${yellow}警告: DNS 可能配置错误，请检查网络连接${plain}"
+    else
+        log "${green}DNS 配置完成${plain}"
     fi
-    timedatectl set-ntp true && echo "时间同步服务已启用" || echo "启用时间同步服务失败"
 }
 
 # 主菜单
-main_menu() {
-    check_dependencies
+show_menu() {
+    echo -e "\n${green}==== 服务器安全加固工具 ====${plain}"
+    echo "1) 修改 SSH 配置"
+    echo "2) 配置 Fail2Ban"
+    echo "3) 解封 IP"
+    echo "4) 更新系统源"
+    echo "5) 配置 DNS"
+    echo "6) 系统时间同步"
+    echo "7) 查看配置日志"
+    echo "8) 退出"
+    echo
+    read -p "请选择 [1-8]: " choice
+    
+    case "$choice" in
+        1) modify_ssh_config ;;
+        2) configure_fail2ban ;;
+        3) unban_ip ;;
+        4) update_sources ;;
+        5) configure_dns ;;
+        6) enable_ntp_service ;;
+        7) [[ -f "$LOG_FILE" ]] && cat "$LOG_FILE" || echo "暂无日志" ;;
+        8) log "${green}感谢使用！${plain}"; exit 0 ;;
+        *) log "${red}无效选择${plain}" ;;
+    esac
+}
 
+# 主程序
+main() {
+    check_system
+    init_system
+    
     while true; do
-        echo -e "\n${green}==== 综合服务器配置工具 ====${plain}"
-        echo "本脚本支持以下功能："
-        echo "1) 修改 SSH 配置（包括端口和密钥登录）"
-        echo "2) 配置 Fail2Ban 防护规则"
-        echo "3) 解封指定 IP"
-        echo "4) 更新系统源"
-        echo "5) 配置 DNS"
-        echo "6) 启用时间同步服务"
-        echo "7) 退出"
-        echo
-        read -p "请输入你的选择 [1-7]: " choice
-        
-        case $choice in
-            1) modify_ssh_config ;;
-            2) configure_fail2ban ;;
-            3) unban_ip ;;
-            4) update_sources ;;
-            5) configure_dns ;;
-            6) enable_ntp_service ;;
-            7) echo -e "${green}感谢使用，再见！${plain}"; exit 0 ;;
-            *) echo -e "${red}无效的选择，请重试${plain}" ;;
-        esac
+        show_menu
     done
 }
 
-main_menu
+main "$@"
