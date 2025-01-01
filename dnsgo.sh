@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# 设置错误时退出
+set -e
+
+# 捕获错误信号
+trap 'error "脚本执行发生错误，行号: $LINENO"' ERR
+
 # 颜色定义
 red='\033[0;31m'
 green='\033[0;32m'
@@ -24,7 +30,7 @@ error() {
 
 # 检查系统函数
 check_system() {
-    if [[ -f /etc/redhat-release ]]; then
+    if [[ ! -f /etc/debian_version ]] && [[ ! -f /etc/ubuntu_version ]]; then
         error "当前脚本仅支持 Debian/Ubuntu 系统"
     fi
     
@@ -40,6 +46,12 @@ init_system() {
     # 创建日志目录
     mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
+    
+    # 检查并设置语言环境
+    if [[ -z "$LANG" ]]; then
+        export LANG=en_US.UTF-8
+        log "设置默认语言环境为 en_US.UTF-8"
+    fi
     
     # 检查并安装基础工具
     local tools=(curl wget ufw net-tools)
@@ -146,6 +158,32 @@ EOF
     log "${green}Fail2Ban 配置完成${plain}"
 }
 
+# 解封IP函数
+unban_ip() {
+    log "${yellow}正在解封IP...${plain}"
+    if ! command -v fail2ban-client &> /dev/null; then
+        error "未安装 Fail2Ban"
+    fi
+    
+    # 显示当前被封禁的IP
+    echo "当前被封禁的IP列表:"
+    fail2ban-client status sshd
+    
+    read -p "请输入要解封的IP: " ip
+    if [[ -n "$ip" ]]; then
+        fail2ban-client set sshd unbanip "$ip"
+        log "${green}已解封 IP: $ip${plain}"
+    fi
+}
+
+# 更新系统源函数
+update_sources() {
+    log "${yellow}正在更新系统源...${plain}"
+    apt update || error "更新源失败"
+    apt upgrade -y || error "系统更新失败"
+    log "${green}系统源更新完成${plain}"
+}
+
 # 优化版 DNS 配置
 configure_dns() {
     log "${yellow}正在配置 DNS...${plain}"
@@ -196,6 +234,27 @@ EOF
     else
         log "${green}DNS 配置完成${plain}"
     fi
+}
+
+# 系统时间同步函数
+enable_ntp_service() {
+    log "${yellow}正在配置系统时间同步...${plain}"
+    
+    # 安装NTP服务
+    if ! command -v ntpdate &> /dev/null; then
+        apt update && apt install -y ntpdate || error "安装 ntpdate 失败"
+    fi
+    
+    # 同步时间
+    ntpdate pool.ntp.org || error "时间同步失败"
+    
+    # 写入定时任务
+    if ! grep -q "ntpdate" /etc/crontab; then
+        echo "0 */12 * * * root ntpdate pool.ntp.org > /dev/null 2>&1" >> /etc/crontab
+        log "已添加定时同步任务"
+    fi
+    
+    log "${green}系统时间同步配置完成${plain}"
 }
 
 # 主菜单
